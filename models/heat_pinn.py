@@ -65,7 +65,7 @@ class HeatPINN(nn.Module):
 
     def _initialize_weights(self):
         """
-        Initialize network weights using Xavier/Glorot initialization.
+        Initialize network weights using Xavier Normal initialization.
         """
         for layer in self.layers:
             if isinstance(layer, nn.Linear):
@@ -259,9 +259,9 @@ if __name__ == "__main__":
     print("Testing HeatPINN implementation...\n")
     
     # Test 1: Forward problem
-    print("=" * 50)
+    print("=" * 60)
     print("Test 1: Forward Problem")
-    print("=" * 50)
+    print("=" * 60)
     
     model_forward = HeatPINN(
         layers=[2, 50, 50, 50, 50, 1],
@@ -283,9 +283,9 @@ if __name__ == "__main__":
     print(f"Residual mean before training: {residual.mean().item():.6f}")
     
     # Test 2: Inverse problem
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("Test 2: Inverse Problem")
-    print("=" * 50)
+    print("=" * 60)
     
     model_inverse = HeatPINN(
         layers=[2, 50, 50, 50, 50, 1],
@@ -296,9 +296,9 @@ if __name__ == "__main__":
     print(f"Alpha is learnable: {model_inverse.alpha.requires_grad}")
     
     # Test 3: Analytical solution
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("Test 3: Analytical Solution")
-    print("=" * 50)
+    print("=" * 60)
     
     x_np = np.linspace(0, 1, 5)
     t_np = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
