@@ -15,7 +15,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
-from typing import Tuple, Dict, Optional
+from typing import Optional
 
 
 class HeatEquationData:
@@ -104,7 +104,7 @@ class HeatEquationData:
         return np.sin(np.pi * x) * np.exp(-self.alpha * np.pi**2 * t)
     
 
-    def generate_collocation_points(self, method: str = 'uniform') -> Tuple[torch.Tensor, torch.Tensor]:
+    def generate_collocation_points(self, method: str = 'uniform') -> tuple[torch.Tensor, torch.Tensor]:
         """
         Generate collocation points for PDE residual evaluation.
         
@@ -131,7 +131,7 @@ class HeatEquationData:
         return x_f.to(self.device), t_f.to(self.device)
     
     
-    def generate_boundary_conditions(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def generate_boundary_conditions(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Generate boundary condition points: u(0, t) = u(L, t) = 0
             
@@ -156,7 +156,7 @@ class HeatEquationData:
         return x_bc.to(self.device), t_bc.to(self.device), u_bc.to(self.device)
     
     
-    def generate_initial_conditions(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def generate_initial_conditions(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Generate initial condition points: u(x, 0) = sin(π*x)
             
@@ -175,7 +175,7 @@ class HeatEquationData:
     def generate_measurements(
         self, 
         add_noise: bool = True
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         """
         Generate synthetic sensor measurements with noise.
         
@@ -248,7 +248,7 @@ class HeatEquationData:
     def generate_full_dataset(
         self, 
         collocation_method: str = 'uniform'
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Generate complete dataset for training.
         
@@ -282,7 +282,7 @@ class HeatEquationData:
         return data
     
     
-    def visualize_data(self, data: Dict[str, torch.Tensor], save_path: Optional[str] = None):
+    def visualize_data(self, data: dict[str, torch.Tensor], save_path: Optional[str] = None):
         """
         Visualize the generated dataset.
         

@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from typing import Tuple, Optional
+from typing import Optional
 
 
 def generate_compact_gaussians(
@@ -21,7 +21,7 @@ def generate_compact_gaussians(
     shrink: Optional[float] = None,
     min_separation: Optional[float] = None,
     smooth: bool = True,
-) -> Tuple[list, list]:
+) -> tuple[list, list]:
     """
     Generates a list of 2D compactly supported Gaussian test functions
     

@@ -15,7 +15,7 @@ Date: January 29, 2026
 
 import torch
 import numpy as np
-from typing import Callable, Tuple, Optional, List
+from typing import Callable, Optional
 from abc import ABC, abstractmethod
 
 
@@ -33,7 +33,7 @@ class Integrator2D(ABC):
     def integrate(
         self, 
         func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        domain: List[List[float]],
+        domain: list[list[float]],
     ) -> torch.Tensor:
         """
         Integrate func over 2D domain.
@@ -75,7 +75,7 @@ class MonteCarloIntegrator(Integrator2D):
     def integrate(
         self,
         func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        domain: List[List[float]],
+        domain: list[list[float]],
         seed: Optional[int] = None
     ) -> torch.Tensor:
         """
@@ -144,7 +144,7 @@ class GaussLegendreIntegrator(Integrator2D):
         nodes: torch.Tensor, 
         a: float, 
         b: float
-    ) -> Tuple[torch.Tensor, float]:
+    ) -> tuple[torch.Tensor, float]:
         """
         Transform nodes from [-1, 1] to [a, b].
         
@@ -159,7 +159,7 @@ class GaussLegendreIntegrator(Integrator2D):
     def integrate(
         self,
         func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        domain: List[List[float]],
+        domain: list[list[float]],
     ) -> torch.Tensor:
         """
         Gauss-Legendre quadrature over 2D domain.
@@ -237,7 +237,7 @@ class SimpsonIntegrator(Integrator2D):
     def integrate(
         self,
         func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        domain: List[List[float]],
+        domain: list[list[float]],
     ) -> torch.Tensor:
         """
         Simpson's rule over 2D domain.
@@ -322,7 +322,7 @@ class AdaptiveSimpsonIntegrator(Integrator2D):
     def integrate(
         self,
         func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        domain: List[List[float]],
+        domain: list[list[float]],
     ) -> torch.Tensor:
         """
         Adaptive Simpson integration.

@@ -11,7 +11,7 @@ Date: January 19, 2026
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Tuple, Optional
+from typing import Optional
 
 
 class HeatPINN(nn.Module):
@@ -172,7 +172,7 @@ class HeatPINN(nn.Module):
         lambda_bc: float = 1.0,
         lambda_ic: float = 1.0,
         lambda_m: float = 1.0
-    ) -> Tuple[torch.Tensor, dict]:
+    ) -> tuple[torch.Tensor, dict]:
         """
         Compute loss functions (MSE) for PINN training.
         

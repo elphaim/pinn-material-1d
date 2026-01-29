@@ -10,7 +10,7 @@ Date: January 29, 2026
 
 import torch
 from abc import ABC, abstractmethod
-from typing import Tuple, Dict, List, Callable
+from typing import Callable
 
 from models.heat_pinn import HeatPINN
 from utils.integrator import IntegratorFactory
@@ -34,9 +34,9 @@ class LossStrategy(ABC):
     def compute_loss(
         self,
         model: HeatPINN,
-        data: Dict,
-        lambdas: Dict[str, float]
-    ) -> Tuple[torch.Tensor, Dict]:
+        data: dict,
+        lambdas: dict[str, float]
+    ) -> tuple[torch.Tensor, dict]:
         """
         Compute loss given model and data.
         
@@ -81,9 +81,9 @@ class StrongFormLoss(LossStrategy):
     def compute_loss(
         self,
         model: HeatPINN,
-        data: Dict,
-        lambdas: Dict[str, float]
-    ) -> Tuple[torch.Tensor, Dict]:
+        data: dict,
+        lambdas: dict[str, float]
+    ) -> tuple[torch.Tensor, dict]:
         """
         Strong-form loss computation for HeatPINN
         """
@@ -130,7 +130,7 @@ class StrongFormLoss(LossStrategy):
             'residual_t': loss_f,
             'boundary_t': loss_bc,
             'initial_t': loss_ic,
-            'measurement_t': loss_m if torch.is_tensor(loss_m) else torch.tensor(0.0)
+            'measurement_t': loss_m
         }
         
         return total_loss, losses
@@ -183,7 +183,7 @@ class WeakFormLoss(LossStrategy):
         self,
         model: HeatPINN,
         test_func: Callable,
-        domain: List[List[float]]
+        domain: list[list[float]]
     ) -> torch.Tensor:
         """
         Compute weak residual for one test function
@@ -227,9 +227,9 @@ class WeakFormLoss(LossStrategy):
     def compute_loss(
         self,
         model: HeatPINN,
-        data: Dict,
-        lambdas: Dict[str, float]
-    ) -> Tuple[torch.Tensor, Dict]:
+        data: dict,
+        lambdas: dict[str, float]
+    ) -> tuple[torch.Tensor, dict]:
         """
         Weak-form loss computation
         """
@@ -289,7 +289,7 @@ class WeakFormLoss(LossStrategy):
             'residual_t': loss_f,
             'boundary_t': loss_bc,
             'initial_t': loss_ic,
-            'measurement_t': loss_m if torch.is_tensor(loss_m) else torch.tensor(0.0)
+            'measurement_t': loss_m
         }
         
         return total_loss, losses
@@ -332,12 +332,12 @@ class StrategicPINN(HeatPINN):
     
     def compute_loss(
         self,
-        data: Dict,
+        data: dict,
         lambda_f: float = 1.0,
         lambda_bc: float = 1.0,
         lambda_ic: float = 1.0,
         lambda_m: float = 1.0
-    ) -> Tuple[torch.Tensor, Dict]:
+    ) -> tuple[torch.Tensor, dict]:
         """
         Compute loss using current strategy.
         
