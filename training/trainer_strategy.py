@@ -11,7 +11,7 @@ import torch
 import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 import time
 from pathlib import Path
 import json
@@ -30,6 +30,11 @@ class StrategicPINNTrainer:
         reduce_lr_patience: Epochs before Adam LR is divided by 2 when loss plateaus (default: 100)
         switch_var: Condition on loss spread to switch from Adam to L-BFGS (default: 1e-12, disabled)
         switch_slope: Condition on loss slope to switch from Adam L-BFGS (default: 1e-12, disabled)
+        switch_window: Window for computing switch criteria (default: 200)
+        min_adam_epochs: Minimum epochs before allowing switch (default: 1000)
+        lbfgs_max_iter: Max iterations per L-BFGS step (default: 20)
+        lbfgs_tolerance: L-BFGS convergence tolerance (default: 1e-9)
+        lbfgs_max_eval: Max function evaluations per L-BFGS step (default: 25)
         track_gradient_norms: Compute all gradients of loss functions (default: False)
         adaptive_weights: Use adaptive loss weighting (default: False)
         weight_update_freq: How often to update weights (default: 100 epochs)
@@ -45,6 +50,11 @@ class StrategicPINNTrainer:
         reduce_lr_patience: int = 100,
         switch_var: float = 1e-12,
         switch_slope: float = 1e-12,
+        switch_window: int = 200,
+        min_adam_epochs: int = 1000,
+        lbfgs_max_iter: int = 20,
+        lbfgs_tolerance: float = 1e-9,
+        lbfgs_max_eval: int = 25,
         track_gradient_norms: bool = False,
         adaptive_weights: bool = False,
         weight_update_freq: int = 100,
@@ -54,8 +64,6 @@ class StrategicPINNTrainer:
         self.model = model.to(device)
         self.data = data
         self.device = device
-        self.switch_var = switch_var
-        self.switch_slope = switch_slope
         self.track_gradient_norms = track_gradient_norms
         self.adaptive_weights = adaptive_weights
         self.weight_update_freq = weight_update_freq
@@ -67,18 +75,38 @@ class StrategicPINNTrainer:
         else:
             torch.set_default_dtype(torch.float32)
         
-        # Optimizers
-        self.adam = optim.Adam(model.parameters(), 
-                               lr=learning_rate)
-        self.lbfgs = optim.LBFGS(model.parameters(), 
-                                 max_iter=500, 
-                                 line_search_fn='strong_wolfe')
+        # Adam optimizer
+        self.adam = optim.Adam(
+            model.parameters(), 
+            lr=learning_rate,
+            weight_decay=0.0
+        )
         
-        # LR scheduler
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.adam, 
-                                                              factor=0.5, 
-                                                              patience=reduce_lr_patience,
-                                                              min_lr=1e-6)
+        # LR scheduler for Adam
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.adam, 
+            factor=0.5, 
+            patience=reduce_lr_patience,
+            min_lr=1e-6
+        )
+
+        # L-BFGS optimizer
+        self.lbfgs = optim.LBFGS(
+            model.parameters(),
+            lr=1.0, 
+            max_iter=lbfgs_max_iter,
+            max_eval=lbfgs_max_eval,
+            tolerance_grad=lbfgs_tolerance,
+            tolerance_change=lbfgs_tolerance,
+            history_size=100, 
+            line_search_fn='strong_wolfe'
+        )
+        
+        # Switch parameters
+        self.switch_var = switch_var
+        self.switch_slope = switch_slope
+        self.switch_window = switch_window
+        self.min_adam_epochs = min_adam_epochs
         
         # Loss weights
         self.lambda_f = 1.0
@@ -104,6 +132,8 @@ class StrategicPINNTrainer:
             'lambda_bc': [],
             'lambda_ic': [],
             'lambda_m': [],
+            'optimizer': [],
+            'lbfgs_iter': []
         }
         
         if model.inverse:
@@ -115,16 +145,60 @@ class StrategicPINNTrainer:
             self.history['grad_norm_ic'] = []
             self.history['grad_norm_m'] = []
 
+        # L-BFGS tracking
+        self.lbfgs_iteration = 0
+        self.lbfgs_losses = []
+
         # Print status
-        print(f"Strategic Trainer initialized:")
+        print(f"Trainer initialized:")
         print(f"  Loss strategy: {model.loss_strategy.__class__.__name__}")
-        print(f"  L-BFGS switch: {'disabled' if switch_var < 1e-10 else switch_var}")
+        print(f"  Adam LR: {learning_rate}")
+        print(f"  Switch criteria: var < {switch_var}, |slope| < {switch_slope}")
+        print(f"  L-BFGS max iter: {lbfgs_max_iter}")
         print(f"  Tracking gradient L2 norms: {track_gradient_norms}")
         print(f"  Adaptive weights: {adaptive_weights}")
         if adaptive_weights:
             print(f"  EMA smoothing: {weight_ema}")
             print(f"  Update frequency: every {weight_update_freq} epochs")
         print(f"  Problem type: {'Inverse' if model.inverse else 'Forward'}")
+
+
+    def should_switch_to_lbfgs(self, epoch: int) -> Tuple[bool, str]:
+        """
+        Determine if should switch from Adam to L-BFGS.
+        
+        Returns:
+            should_switch: Boolean
+            reason: String explaining decision
+        """
+        # Too early
+        if epoch < self.min_adam_epochs:
+            return False, f"Too early (< {self.min_adam_epochs})"
+        
+        # Not enough history
+        if len(self.history['total_loss']) < self.switch_window:
+            return False, "Insufficient history"
+        
+        # Compute switching criteria
+        past_losses = self.history['total_loss'][-self.switch_window:]
+        
+        # Variance ratio (plateau detection)
+        p95 = np.percentile(past_losses, 95)
+        p5 = np.percentile(past_losses, 5)
+        var_ratio = (p95 - p5) / p95
+        
+        # Slope (stagnation detection)
+        t = np.arange(self.switch_window)
+        slope = np.polyfit(t, np.log(past_losses), 1)[0]
+        
+        # Check criteria
+        plateau = var_ratio < self.switch_var
+        stagnant = abs(slope) < self.switch_slope
+        
+        if plateau and stagnant:
+            return True, f"Plateau detected (var={var_ratio:.6f}, slope={abs(slope):.6f})"
+        
+        return False, f"Not ready (var={var_ratio:.6f}, slope={abs(slope):.6f})"
 
     
     def compute_loss_gradients(self) -> Dict[str, float]:
@@ -258,68 +332,86 @@ class StrategicPINNTrainer:
         }
     
 
-    def train_epoch(self, use_lbfgs: bool = False) -> Tuple[Dict[str, float], Optional[float]]:
+    def train_epoch_adam(self) -> Tuple[Dict[str, float], Optional[float]]:
         """
-        Execute one training epoch.
-
-        Args:
-            use_lbfgs: whether to use the L-BFGS optimizer
+        Execute one training epoch with Adam optimizer
         
         Returns:
             losses: Dictionary with loss values
             lr: Current Adam LR
         """
         self.model.train()
+        self.adam.zero_grad()
+
+        # Compute loss using strategy
+        total_loss, losses = self.model.compute_loss(
+            data=self.data,
+            lambda_f=self.lambda_f,
+            lambda_bc=self.lambda_bc,
+            lambda_ic=self.lambda_ic,
+            lambda_m=self.lambda_m
+        )
+
+        # Backward
+        total_loss.backward()
+        self.adam.step()
+
+        # LR scheduler
+        old_lr = self.adam.param_groups[0]["lr"]
+        self.scheduler.step(total_loss.item())
+        new_lr = self.adam.param_groups[0]["lr"]
+
+        if new_lr < old_lr:
+            print("\n" + "=" * 40)
+            print(f"Adam LR reduced: {old_lr:.2e} -> {new_lr:.2e}")
+            print("=" * 40)
+
+        return losses, new_lr
         
-        if not use_lbfgs:
-            # Use Adam optimizer
-            self.adam.zero_grad()
-            # Compute loss using strategy
+
+    def train_lbfgs_step(self) -> List[Dict[str, float]]:
+        """
+        Single L-BFGS step (which includes multiple line searches).
+        
+        Returns:
+            losses_list: List of losses from each internal iteration
+        """
+        self.model.train()
+        
+        # Reset L-BFGS iteration counter for this step
+        self.lbfgs_iteration = 0
+        self.lbfgs_losses = []
+        
+        def closure():
+            """
+            L-BFGS closure function.
+            
+            Called multiple times per .step() during line search.
+            We track each call to visualize L-BFGS convergence.
+            """
+            self.lbfgs.zero_grad()
+            
             total_loss, losses = self.model.compute_loss(
                 data=self.data,
                 lambda_f=self.lambda_f,
                 lambda_bc=self.lambda_bc,
                 lambda_ic=self.lambda_ic,
                 lambda_m=self.lambda_m
-            ) 
-            # Backward
-            total_loss.backward()
-            self.adam.step()
-            # LR scheduler
-            old_lr = self.adam.param_groups[0]["lr"]
-            self.scheduler.step(total_loss.item())
-            new_lr = self.adam.param_groups[0]["lr"]
-            if new_lr < old_lr:
-                print("\n" + "=" * 40)
-                print(f"Adam LR reduced: {old_lr:.2e} -> {new_lr:.2e}")
-                print("=" * 40)
-
-            return losses, new_lr
-        
-        if use_lbfgs:
-            # Switch to L-BFGS
-            def closure():
-                self.lbfgs.zero_grad()
-                total_loss, _ = self.model.compute_loss(
-                    data=self.data,
-                    lambda_f=self.lambda_f,
-                    lambda_bc=self.lambda_bc,
-                    lambda_ic=self.lambda_ic,
-                    lambda_m=self.lambda_m
-                )
-                total_loss.backward()
-                return total_loss
-            self.lbfgs.step(closure)
-            # Final losses after L-BFGS
-            _, losses = self.model.compute_loss(
-                data=self.data,
-                lambda_f=self.lambda_f,
-                lambda_bc=self.lambda_bc,
-                lambda_ic=self.lambda_ic,
-                lambda_m=self.lambda_m
             )
-
-            return losses, None
+            
+            total_loss.backward()
+            
+            # Store this iteration's losses
+            self.lbfgs_losses.append(losses)
+            self.lbfgs_iteration += 1
+            
+            return total_loss
+        
+        # Single L-BFGS step (internally does multiple line searches)
+        self.lbfgs.step(closure)
+        
+        # Return all intermediate losses from this step
+        return self.lbfgs_losses
             
     
     def train(
@@ -327,15 +419,19 @@ class StrategicPINNTrainer:
         epochs: int = 5000,
         print_every: int = 500,
         plot_every: int = 1000,
+        lbfgs_max_steps: int = 100,
+        lbfgs_convergence_tol: float = 1e-7,
         save_path: Optional[str] = None
     ):
         """
         Main training loop.
         
         Args:
-            epochs: Number of training epochs (default: 5000)
-            print_every: Print progress every N epochs (default: 500)
-            plot_every: Plot progress every N epochs (default: 1000)
+            epochs: Max number of Adam training epochs (default: 5000)
+            print_every: Print progress every N Adam epochs (default: 500)
+            plot_every: Plot progress every N Adam epochs (default: 1000)
+            lbfgs_max_steps: Maximum L-BFGS steps after switch
+            lbfgs_convergence_tol: Stop L-BFGS if loss change < this
             save_path: Path to save model checkpoints (default: None)
         """
         print("\n" + "=" * 60)
@@ -343,12 +439,17 @@ class StrategicPINNTrainer:
         print("=" * 60)
         
         start_time = time.time()
-
-        # Begin training with Adam optimizer
         use_lbfgs = False
-        lbfgs_epoch = 0
+        lbfgs_step_count = 0
+        lbfgs_switch_epoch = None
         
+        # Begin training with Adam optimizer
         for epoch in range(epochs):
+
+            # Exit loop if switch
+            if use_lbfgs:
+                break
+
             # Compute loss gradient norms
             if self.track_gradient_norms:
                 grads = self.compute_loss_gradients()
@@ -366,35 +467,8 @@ class StrategicPINNTrainer:
                 self.lambda_m = weights['lambda_m']
 
             # Train one epoch
-            losses, lr = self.train_epoch(use_lbfgs)
+            losses, lr = self.train_epoch_adam()
 
-            # Switch to L-BFGS when loss spread gets below threshold
-            if len(self.history['total_loss']) > 200:
-                past_losses = self.history['total_loss'][-200:]
-                # Percentile variation for flatness
-                p95_losses = np.percentile(past_losses, 95)
-                p5_losses = np.percentile(past_losses, 5)
-                var_ratio = (p95_losses - p5_losses) / p95_losses
-                plateau_detected = var_ratio < self.switch_var
-                # Slope variation (log-loss) for slow trend
-                t = np.arange(200)
-                slope = np.polyfit(t, np.log(past_losses), 1)[0]
-                stagnation_detected = abs(slope) < self.switch_slope
-                # Use both to trigger L-BFGS
-                if plateau_detected and stagnation_detected:
-                    if not use_lbfgs:
-                        # Inform of the switch
-                        print("\n" + "=" * 40)
-                        print(f"Switching to L-BFGS at epoch {epoch}")
-                        print(f"  Variance ratio: {var_ratio:.6f} < {self.switch_var}")
-                        print(f"  Slope (log): |{slope:.6f}| < {self.switch_slope}")
-                        print("=" * 40)
-                        lbfgs_epoch = epoch
-                    use_lbfgs = True
-            # Break 10 epochs after switch to L-BFGS (for visualization)
-            if use_lbfgs and epoch >= lbfgs_epoch + 10:
-                break
-            
             # Record history
             self.history['epoch'].append(epoch)
             self.history['total_loss'].append(losses['total'])
@@ -406,6 +480,8 @@ class StrategicPINNTrainer:
             self.history['lambda_bc'].append(self.lambda_bc)
             self.history['lambda_ic'].append(self.lambda_ic)
             self.history['lambda_m'].append(self.lambda_m)
+            self.history['optimizer'].append('adam')
+            self.history['lbfgs_iter'].append(0)
             
             if self.model.inverse:
                 self.history['alpha'].append(self.model.get_alpha())
@@ -438,6 +514,78 @@ class StrategicPINNTrainer:
             if epoch % plot_every == 0 and epoch > 0:
                 self.plot_progress()
 
+            # Check if should switch to L-BFGS
+            should_switch, reason = self.should_switch_to_lbfgs(epoch)
+            
+            if should_switch:
+                use_lbfgs = True
+                lbfgs_switch_epoch = epoch
+                
+                print("\n" + "=" * 60)
+                print(f"Switching to L-BFGS at Epoch {epoch}")
+                print(f"   Reason: {reason}")
+                print(f"   Loss before switch: {losses['total']:.6e}")
+                print("=" * 60)
+
+        # L-BFGS training
+        if use_lbfgs and lbfgs_switch_epoch is not None:
+
+            loss_before_lbfgs = self.history['total_loss'][-1]
+            prev_step_losses = []
+
+            for lbfgs_step in range(lbfgs_max_steps):
+                # Single L-BFGS step (multiple internal iterations)
+                step_losses = self.train_lbfgs_step()
+                
+                # Record ALL intermediate iterations
+                for iter_losses in step_losses:
+                    # Use pseudo-epoch number for continuity in plots
+                    pseudo_epoch = lbfgs_switch_epoch + lbfgs_step_count + 1
+                    
+                    self.history['epoch'].append(pseudo_epoch)
+                    self.history['total_loss'].append(iter_losses['total'])
+                    self.history['residual_loss'].append(iter_losses['residual'])
+                    self.history['boundary_loss'].append(iter_losses['boundary'])
+                    self.history['initial_loss'].append(iter_losses['initial'])
+                    self.history['measurement_loss'].append(iter_losses['measurement'])
+                    self.history['lambda_f'].append(self.lambda_f)
+                    self.history['lambda_bc'].append(self.lambda_bc)
+                    self.history['lambda_ic'].append(self.lambda_ic)
+                    self.history['lambda_m'].append(self.lambda_m)
+                    self.history['optimizer'].append('lbfgs')
+                    self.history['lbfgs_iter'].append(self.lbfgs_iteration)
+                    
+                    if self.model.inverse:
+                        self.history['alpha'].append(self.model.get_alpha())
+
+                    if self.track_gradient_norms:
+                        self.history['grad_norm_f'].append(self.grad_norm_f)
+                        self.history['grad_norm_bc'].append(self.grad_norm_bc)
+                        self.history['grad_norm_ic'].append(self.grad_norm_ic)
+                        self.history['grad_norm_m'].append(self.grad_norm_m)
+                    
+                    lbfgs_step_count += 1
+                
+                # Print progress
+                final_loss = step_losses[-1]['total']
+                print(f"\nL-BFGS Step {lbfgs_step+1}/{lbfgs_max_steps}")
+                print(f"  Internal iterations: {len(step_losses)}")
+                print(f"  Loss: {final_loss:.6e}")
+                print(f"  Improvement: {abs(loss_before_lbfgs - final_loss) / loss_before_lbfgs:.2%}")
+                
+                # Check convergence
+                if lbfgs_step > 0:
+                    prev_loss = self.history['total_loss'][
+                        -(len(step_losses) + len(prev_step_losses))
+                    ]
+                    loss_change = abs(final_loss - prev_loss)
+                    
+                    if loss_change < lbfgs_convergence_tol:
+                        print(f"\nL-BFGS converged (loss change: {loss_change:.6e})")
+                        break
+                
+                prev_step_losses = step_losses
+
         # Last plot
         print(f"\nFinal training plot:")
         self.plot_progress()
@@ -460,6 +608,13 @@ class StrategicPINNTrainer:
         epochs = self.history['epoch']
         plots = []
 
+        # Find where L-BFGS starts
+        lbfgs_start = None
+        for i, opt in enumerate(self.history['optimizer']):
+            if opt == 'lbfgs':
+                lbfgs_start = i
+                break
+
         def plot_losses(ax):
             ax.semilogy(epochs, self.history['total_loss'], 'k-', label='Total', linewidth=2)
             ax.semilogy(epochs, self.history['residual_loss'], 'b-', label='Residual', alpha=0.7)
@@ -467,6 +622,9 @@ class StrategicPINNTrainer:
             ax.semilogy(epochs, self.history['initial_loss'], 'g-', label='Initial', alpha=0.7)
             if self.model.inverse:
                 ax.semilogy(epochs, self.history['measurement_loss'], 'm-', label='Measurement', alpha=0.7)
+            # Mark start of L-BFGS
+            if lbfgs_start:
+                ax.axvline(x=epochs[lbfgs_start], color='green', linestyle='--', linewidth=2)
             ax.set_xlabel('Epoch')
             ax.set_ylabel('Loss')
             ax.set_title('Loss Components')
